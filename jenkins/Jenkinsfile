@@ -1,0 +1,126 @@
+pipeline {
+    agent {
+        node {
+            label 'dev-server'
+        }
+    }
+    environment {
+        APP_NAME = "auto-job-ads"
+        MAJOR_RELEASE = "0.1"
+        DOCKER_TAG = "${MAJOR_RELEASE}.${env.BUILD_NUMBER}"
+        DOCKER_REG = "harbor.skillab-project.eu"
+        DOCKER_REPO = "/skillab-all/"
+        DOCKER_REG_CREDS = "harbor-creds"
+		ENV_FILE_CREDENTIALS = "llm-api-creds"
+    }
+
+    stages {
+        // *************************
+        // *** PREPARATION STAGE ***
+        // *************************
+        stage('Preparation') {
+            steps {
+                echo "***** Cleaning Workspace and Checking Out Code *****"
+                cleanWs()
+                checkout scm
+            }
+        }
+        
+		// *********************************
+        // *** CREATE .env from Jenkins ****
+        // *********************************
+        stage("Prepare Env File") {
+            steps {
+				withCredentials([usernamePassword(credentialsId: "${ENV_FILE_CREDENTIALS}", usernameVariable: 'API_USER', passwordVariable: 'API_PASS')]) {
+					echo "***** Creating .env file *****"
+					sh """
+						# start clean
+						rm -f .env
+
+						# copy defaults from example
+						cp .env.example .env
+					"""
+				}
+            }
+        }
+	
+        // *************************
+        // *** IMAGE BUILD STAGE ***
+        // *************************
+        stage("Build_Docker_Images"){
+            steps {
+                echo "***** Building Docker Image *****"
+				withCredentials([usernamePassword(credentialsId: "${ENV_FILE_CREDENTIALS}", usernameVariable: 'API_USER', passwordVariable: 'API_PASS')]) {
+					sh "DOCKER_TAG=test API_TOKEN=${API_PASS} docker compose -f docker-compose.yml build"
+				}
+            }
+        }
+		
+		// **************************
+        // *** RUN THE UNIT TESTS ***
+        // **************************
+        stage("Run_Unit_Tests"){
+            steps {
+                echo "***** Running Unit Tests *****"
+				withCredentials([usernamePassword(credentialsId: "${ENV_FILE_CREDENTIALS}", usernameVariable: 'API_USER', passwordVariable: 'API_PASS')]) {
+					sh "DOCKER_TAG=test API_TOKEN=${API_PASS} docker compose -f docker-compose.yml run --rm -e PYTHONPATH=/app auto-job-ads pytest -q"
+				}
+            }
+        }
+
+        // ****************************
+        // *** Push Images In Harbor ***
+        // ****************************
+        stage("Push_Image"){
+            when {
+                environment name: "GIT_BRANCH", value: "origin/main"
+            }
+            steps {
+                withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: "${DOCKER_REG_CREDS}", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD']]){
+                    echo "***** Push Docker Image *****"
+                    sh 'docker login ${DOCKER_REG} -u ${USERNAME} -p ${PASSWORD}'
+                    sh 'docker tag ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:test ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG}'
+                    sh 'docker push ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG}'
+					
+					// Also tag and push as latest
+                    sh 'docker tag ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:test ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:latest'
+                    sh 'docker push ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:latest'
+                }
+            }
+        }
+        
+        // **************
+        // *** Deploy ***
+        // **************
+        stage("Deployment"){
+            when {
+                environment name: "GIT_BRANCH", value: "origin/main"
+            }
+
+            steps {
+                withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: "${DOCKER_REG_CREDS}", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD']]){
+                    echo "***** Deploy Application *****"
+					withCredentials([usernamePassword(credentialsId: "${ENV_FILE_CREDENTIALS}", usernameVariable: 'API_USER', passwordVariable: 'API_PASS')]) {
+						sh 'docker login ${DOCKER_REG} -u ${USERNAME} -p ${PASSWORD}'
+						sh 'docker network inspect shared-net >/dev/null 2>&1 || docker network create shared-net'
+						sh 'DOCKER_TAG=${DOCKER_TAG} API_TOKEN=${API_PASS} docker compose -f docker-compose.yml pull'
+						sh 'docker rm -f auto-job-ads || true'
+						sh 'DOCKER_TAG=${DOCKER_TAG} API_TOKEN=${API_PASS} docker compose -f docker-compose.yml up -d --remove-orphans'
+						sh 'docker compose -f docker-compose.yml ps'
+					}
+                }
+            }
+        }
+    }
+    post{
+        always {
+            // Remove specific images
+            sh 'docker rmi ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:test || true'
+        }
+        failure {
+            echo "Build failed. Cleaned up docker environment."
+            sh 'docker rmi ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG} || true'
+            sh 'docker rmi ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:latest || true'
+        }
+    }
+}

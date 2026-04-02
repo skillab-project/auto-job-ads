@@ -1,0 +1,22 @@
+services:
+  auto-job-ads:
+    container_name: auto-job-ads
+    build: .
+    image: ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG}
+    env_file:
+      - .env
+    environment:
+      API_URL: http://160.40.52.27:3000
+      API_TOKEN: ${API_TOKEN}
+    ports:
+      - "8891:8891"
+    networks:
+      - shared-net
+    restart: unless-stopped
+    labels:
+      io.portainer.accesscontrol.teams: skillab-all
+
+networks:
+  shared-net:
+    external: true
+    name: shared-net
