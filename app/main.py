@@ -8,6 +8,7 @@ Created on Thu Apr 2 13:33:15 2026
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -36,6 +37,8 @@ class Settings(BaseModel):
 
 
 settings = Settings()
+
+logger = logging.getLogger("auto-job-ads")
 
 HEADERS = {
     "Authorization": f"Bearer {settings.api_token}",
@@ -122,16 +125,51 @@ def _strip_code_fences(text: str) -> str:
     return text
 
 
+def _stream_content(response: requests.Response) -> str:
+    """Accumulate the assistant message content from an SSE stream."""
+    parts: List[str] = []
+    for raw_line in response.iter_lines(decode_unicode=True):
+        if not raw_line:
+            continue
+        line = raw_line.strip()
+        if line.startswith("data:"):
+            line = line[len("data:"):].strip()
+        if not line or line == "[DONE]":
+            continue
+        try:
+            chunk = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        try:
+            choice = chunk["choices"][0]
+        except (KeyError, IndexError):
+            continue
+        # OpenAI-style streaming uses "delta"; some servers send "message".
+        piece = (choice.get("delta") or choice.get("message") or {}).get("content")
+        if piece:
+            parts.append(piece)
+    return "".join(parts)
+
+
 def _chat_json(payload: Dict[str, Any], timeout: int) -> Dict[str, Any]:
     url = f"{settings.api_url}/api/chat/completions"
+    stream_payload = {**payload, "stream": True}
     for attempt in range(3):
         try:
-            response = requests.post(url, headers=HEADERS, json=payload, timeout=timeout)
+            response = requests.post(
+                url,
+                headers=HEADERS,
+                json=stream_payload,
+                timeout=timeout,
+                stream=True,
+            )
             response.raise_for_status()
-            body = response.json()
-            content = body["choices"][0]["message"]["content"]
-            return json.loads(_strip_code_fences(content or ""))
-        except Exception:
+            content = _stream_content(response)
+            if not content.strip():
+                raise RuntimeError("LLM returned an empty stream")
+            return json.loads(_strip_code_fences(content))
+        except Exception as exc:
+            logger.warning("LLM request failed (attempt %d/3): %s", attempt + 1, exc)
             if attempt == 2:
                 raise
             time.sleep(0.75 * (attempt + 1))
