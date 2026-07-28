@@ -10,11 +10,16 @@ services:
       API_TOKEN: ${API_TOKEN}
     ports:
       - "8891:8891"
+    volumes:
+      - auto-job-ads-results:/app/results
     networks:
       - shared-net
     restart: unless-stopped
     labels:
       io.portainer.accesscontrol.teams: skillab-all
+
+volumes:
+  auto-job-ads-results:
 
 networks:
   shared-net:

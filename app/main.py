@@ -12,12 +12,14 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 import requests
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, ValidationError
 
 
@@ -48,6 +50,42 @@ HEADERS = {
 }
 
 JOB_STORE: Dict[str, Dict[str, Any]] = {}
+
+RESULTS_DIR = Path(os.getenv("RESULTS_DIR", "./results"))
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# =========================
+# Result persistence
+# =========================
+def _result_path(job_id: str) -> Path:
+    return RESULTS_DIR / f"{job_id}.json"
+
+
+def _save_result(record: Dict[str, Any]) -> None:
+    """Persist a job record to ./results/{id}.json."""
+    job_id = record.get("job_id")
+    if not job_id:
+        return
+    try:
+        path = _result_path(job_id)
+        path.write_text(
+            json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError as exc:
+        logger.error("Failed to persist result for job %s: %s", job_id, exc)
+
+
+def _load_result(job_id: str) -> Optional[Dict[str, Any]]:
+    """Load a persisted job record, or None if the file is missing/unreadable."""
+    path = _result_path(job_id)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.error("Failed to read result file for job %s: %s", job_id, exc)
+        return None
 
 
 # =========================
@@ -387,14 +425,19 @@ def call_llm_for_job_ad(req: JobAdRequest) -> Dict[str, Any]:
 # Background jobs
 # =========================
 def run_job_ad_job(job_id: str, req: JobAdRequest) -> None:
+    record = JOB_STORE[job_id]
+    record["organization"] = req.company_name
     try:
-        JOB_STORE[job_id]["status"] = "running"
+        record["status"] = "running"
         raw = call_llm_for_job_ad(req)
-        JOB_STORE[job_id]["status"] = "success"
-        JOB_STORE[job_id]["result"] = JobAdResponse(**raw).dict()
+        record["status"] = "success"
+        record["result"] = JobAdResponse(**raw).dict()
     except Exception as exc:
-        JOB_STORE[job_id]["status"] = "error"
-        JOB_STORE[job_id]["error"] = str(exc)
+        record["status"] = "error"
+        record["error"] = str(exc)
+    finally:
+        record["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _save_result(record)
 
 
 # =========================
@@ -406,16 +449,37 @@ app = FastAPI(title="SKILLAB Auto Job Ads Service", version="1.0.0")
 @app.post("/jobs/job-ad")
 def create_job_ad_job(req: JobAdRequest, background: BackgroundTasks, request: Request):
     job_id = str(uuid4())
-    JOB_STORE[job_id] = {"status": "pending", "result": None, "error": None}
+    JOB_STORE[job_id] = {
+        "job_id": job_id,
+        "status": "pending",
+        "result": None,
+        "error": None,
+        "organization": req.company_name,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
     background.add_task(run_job_ad_job, job_id, req)
     return {"job_id": job_id, "status_url": f"{request.base_url}jobs/{job_id}"}
 
 
+@app.get("/jobs")
+def list_jobs(organization: str = Query(..., description="Organization / company name")):
+    """Return all job ids that have a persisted result for the given organization."""
+    job_ids: List[str] = []
+    for path in RESULTS_DIR.glob("*.json"):
+        record = _load_result(path.stem)
+        if record and record.get("organization") == organization:
+            job_ids.append(record.get("job_id", path.stem))
+    return {"organization": organization, "count": len(job_ids), "job_ids": job_ids}
+
+
 @app.get("/jobs/{job_id}")
 def get_job_status(job_id: str):
-    if job_id not in JOB_STORE:
-        raise HTTPException(status_code=404, detail="Job ID not found")
-    return JOB_STORE[job_id]
+    if job_id in JOB_STORE:
+        return JOB_STORE[job_id]
+    record = _load_result(job_id)
+    if record is not None:
+        return record
+    raise HTTPException(status_code=404, detail="Job ID not found")
 
 
 @app.post("/job-ad/generate", response_model=JobAdResponse)
