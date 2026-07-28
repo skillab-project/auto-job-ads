@@ -418,7 +418,40 @@ def call_llm_for_job_ad(req: JobAdRequest) -> Dict[str, Any]:
 
     raw = _chat_json(payload, timeout=settings.timeout + 10)
     raw.setdefault("prompt_summary", prompt_summary)
+    _ensure_full_advertisement(raw)
     return raw
+
+
+def _ensure_full_advertisement(raw: Dict[str, Any]) -> None:
+    """Synthesize `full_advertisement` from the structured fields if the model
+    omitted it, so one missing field doesn't fail the whole job."""
+    export = raw.get("structured_export")
+    if not isinstance(export, dict):
+        return
+    if export.get("full_advertisement"):
+        return
+
+    logger.warning("Model omitted `full_advertisement`; synthesizing from structured fields.")
+
+    def _section(label: str, items: Any) -> str:
+        if not items:
+            return ""
+        if isinstance(items, list):
+            body = "\n".join(f"- {item}" for item in items)
+        else:
+            body = str(items)
+        return f"{label}:\n{body}\n"
+
+    parts = [
+        export.get("title", ""),
+        export.get("summary", ""),
+        _section("Responsibilities", export.get("responsibilities")),
+        _section("Required qualifications", export.get("required_qualifications")),
+        _section("Preferred qualifications", export.get("preferred_qualifications")),
+        _section("Benefits", export.get("benefits")),
+        export.get("call_to_action", ""),
+    ]
+    export["full_advertisement"] = "\n\n".join(p for p in parts if p).strip()
 
 
 # =========================
