@@ -88,6 +88,25 @@ pipeline {
                 }
             }
         }
+
+		// ********************************
+        // *** Push Images In Docker Hub ***
+        // ********************************
+        stage("Push_Image_Docker_Hub"){
+            when {
+                environment name: "GIT_BRANCH", value: "origin/main"
+            }
+            steps {
+                withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: "${DOCKER_HUB_CREDS}", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD']]){
+                    echo "***** Push Docker Image to Docker Hub *****"
+                    sh 'docker login ${DOCKER_HUB_REG} -u ${USERNAME} -p ${PASSWORD}'
+                    sh 'docker image tag ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG} ${USERNAME}/${APP_NAME}:${DOCKER_TAG}'
+                    sh 'docker image tag ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG} ${USERNAME}/${APP_NAME}:latest'
+                    sh 'docker image push ${USERNAME}/${APP_NAME}:${DOCKER_TAG}'
+                    sh 'docker image push ${USERNAME}/${APP_NAME}:latest'
+                }
+            }
+        }
         
         // **************
         // *** Deploy ***
