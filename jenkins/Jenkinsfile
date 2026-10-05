@@ -12,6 +12,9 @@ pipeline {
         DOCKER_REPO = "/skillab-all/"
         DOCKER_REG_CREDS = "harbor-creds"
 		ENV_FILE_CREDENTIALS = "llm-api-creds"
+        DOCKER_HUB_REG = "docker.io"
+        DOCKER_HUB_CREDS = "docker-hub-creds"
+        DOCKER_HUB_USERNAME = "skillabproject"
     }
 
     stages {
